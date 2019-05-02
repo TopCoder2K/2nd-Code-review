@@ -1,16 +1,32 @@
 import telebot
 import requests
 import json
-import database
-from app import bot, NAME, REQ_VISITS, CUR_VISITS
+from app import bot
 from decimal import *
+from peewee import *
+
+
+# Connect to database.
+db = PostgresqlDatabase(database="postgres", user="postgres", password="TopCoder2000", host="localhost")
+
+
+# Make a new table (if not exists).
+class TgUser(Model):
+    name = CharField()
+    req_visits = IntegerField()
+    cur_visits = IntegerField()
+    user_id = IntegerField()
+
+    class Meta:
+        # Model will use "postgres.db".
+        database = db
 
 
 # A decorator to define command "/start" and make greetings.
 @bot.message_handler(comands=["start"])
 def start_message(message):
     bot.send_message(message.chat.id,
-                     text="Hi, Im Jarvis. I can predict weather and count your physical education visiting."
+                     text="Hi, Im Jarvis. I can predict weather and count your physical education visiting.\n"
                           "If you want to start using the bot write '/help'.")
 
 
@@ -18,31 +34,49 @@ def start_message(message):
 @bot.message_handler(commands=["help"])
 def handle_help(message):
     bot.send_message(message.chat.id, "To logon write '/reg'.\n"
-                                      "To reset visits write '/new_semester'.")
+                                      "To reset visits write '/new_semester'. (If you have already registered).")
 
 
 # A decorator to define command "/reg" to start using the bot.
 @bot.message_handler(commands=["reg"])
 def handle_reg(message):
-    bot.send_message(message.chat.id, "What's your name?")
-    bot.register_next_step_handler(message, get_name)
+    flag = True
+    try:
+        TgUser.select().where(TgUser.user_id == message.chat.id).get()
+    except DoesNotExist:
+        flag = False
+    if not flag:
+        bot.send_message(message.chat.id, "What's your name?")
+        bot.register_next_step_handler(message, get_name)
+    else:
+        user = TgUser.select().where(TgUser.user_id == message.chat.id).get()
+        bot.send_message(message.chat.id, "Hi, {}!".format(user.name))
+        weather_or_phys_edu(message)
 
 
 # A decorator to define command "/new_semester" to reset physical education visits.
 @bot.message_handler(commands=["new_semester"])
-def handle_reg(message):
-    global CUR_VISITS, REQ_VISITS
-    CUR_VISITS = 0
-    REQ_VISITS = 0
-    bot.send_message(message.chat.id, "Ok. You reset your physical education visits.")
-    weather_or_phys_edu(message)
+def handle_new_semester(message):
+    flag = True
+    user = None
+    try:
+        user = TgUser.select().where(TgUser.user_id == message.chat.id).get()
+    except DoesNotExist:
+        flag = False
+    if flag:
+        TgUser.update(cur_visits=0, req_visits=0).where(TgUser.user_id == message.chat.id).execute()
+        bot.send_message(message.chat.id, "Ok, {}. I've just reset your physical education visits."
+                         .format(user.name))
+        weather_or_phys_edu(message)
+    else:
+        bot.send_message(message.chat.id, "You are not registred. Please, do it by command '/reg'.")
 
 
 # Get interlocutor's name, save it and continue the registration. (+ later check unique names)
 def get_name(message):
-    global NAME
-    NAME = message.text
-    bot.send_message(message.chat.id, "Nice to meet you, {}. ".format(NAME))
+    user_name = message.text
+    bot.send_message(message.chat.id, "Nice to meet you, {}. ".format(user_name))
+    TgUser.create(name=user_name, req_visits=0, cur_visits=0, user_id=message.chat.id)
     weather_or_phys_edu(message)
 
 
@@ -73,7 +107,8 @@ def callback_weather(call):
 def callback_phys_edu(call):
     bot.send_message(call.message.chat.id,
                      "Then we will talk about your physical education visits.")
-    if REQ_VISITS == 0:
+    user = TgUser.select().where(TgUser.user_id == call.message.chat.id).get()
+    if user.req_visits == 0:
         bot.send_message(call.message.chat.id,
                          "How many times should you go to physical education per semester?")
         bot.register_next_step_handler(call.message, set_up_visits)
@@ -83,21 +118,22 @@ def callback_phys_edu(call):
 
 # Initialise require number of visits
 def set_up_visits(message):
-    global REQ_VISITS
+    req_visits = 0
     # Check for adequate answer.
     try:
-        REQ_VISITS = int(message.text)
+        req_visits = int(message.text)
     except (TypeError, ValueError):
         bot.send_message(message.chat.id, "Please, use numbers.")
         bot.register_next_step_handler(message, set_up_visits)
 
     # Check for correct answer.
-    if REQ_VISITS > 1440:
+    if req_visits > 1440:
         bot.send_message(message.chat.id,
                          "Hah. Are you from Exercise College?))) Your value are not allowed.\n"
                          "Write a correct number of visits.")
         bot.register_next_step_handler(message, set_up_visits)
     else:
+        TgUser.update(req_visits=req_visits).where(TgUser.user_id == message.chat.id).execute()
         bot.send_message(message.chat.id, "Ok.")
         add_visit(message)
 
@@ -127,18 +163,20 @@ def callback_phys_edu(call):
 
 # Increase number of visits.
 def increase_visits(message):
-    global CUR_VISITS
-    CUR_VISITS = CUR_VISITS + 1
+    user = TgUser.select().where(TgUser.user_id == message.chat.id).get()
+    TgUser.update(cur_visits=user.cur_visits + 1).where(TgUser.user_id == message.chat.id).execute()
     # Number of visits are displayed.
-    if CUR_VISITS == REQ_VISITS:
+    if user.req_visits + 1 == user.cur_visits:
         bot.send_message(message.chat.id,
-                         "Now you have {} visits.\nOh, yeah! You did it!".format(CUR_VISITS))
-    elif CUR_VISITS >= REQ_VISITS / 2 and CUR_VISITS < REQ_VISITS:
+                         "Now you have {} visits.\nOh, yeah! You did it!".format(user.cur_visits + 1))
+    elif user.cur_visits + 1 >= user.req_visits / 2 \
+            and user.cur_visits + 1 < user.req_visits:
         bot.send_message(message.chat.id,
                          "Now you have {} visits.\n"
-                         "The half is behind. Don't slow down!".format(CUR_VISITS))
+                         "The half is behind. Don't slow down!".format(user.cur_visits + 1))
     else:
-        bot.send_message(message.chat.id, "Now you have {} visits.\nDamn! Rest in peace, bro.".format(CUR_VISITS))
+        bot.send_message(message.chat.id,
+                         "Now you have {} visits.\nDamn! Rest in peace, bro.".format(user.cur_visits + 1))
     add_visit(message)
 
 
@@ -153,7 +191,7 @@ def weather_json(message):
     # Check that the city is found.
     if API_call["cod"] == 200:
         # Parse the json response.
-        bot.send_message(message.chat.id, "Well, {}. There what I've found about {}.".format(NAME, city))
+        bot.send_message(message.chat.id, "Well, there what I've found about {}.".format(city))
         desc_list = API_call["weather"]
         bot.send_message(message.chat.id, "Weather description: {}".format(desc_list[0]["description"]))
 

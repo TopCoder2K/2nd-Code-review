@@ -22,6 +22,10 @@ class TgUser(Model):
         database = db
 
 
+db.connect()
+TgUser.create_table()
+
+
 # A decorator to define command "/start" and make greetings.
 @bot.message_handler(comands=["start"])
 def start_message(message):
